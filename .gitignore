@@ -1,0 +1,27 @@
+# Secrets & tokens
+.env
+tokens/
+.garminconnect/
+
+# Data (your personal Garmin history)
+data/
+*.db
+*.db-journal
+*.db-wal
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Third-party reference material (not part of the project)
+*.pdf

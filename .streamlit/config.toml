@@ -1,0 +1,13 @@
+# Garmin Coach dashboard theme — "Performance Telemetry": dark carbon instrument
+# panel with a volt-lime signature accent. Charts are themed in code (dark,
+# validated colorblind-safe palette). See garmin_coach/dashboard/app.py.
+[theme]
+base = "dark"
+primaryColor = "#c8f13a"
+backgroundColor = "#0c0c0b"
+secondaryBackgroundColor = "#161613"
+textColor = "#f4f3ee"
+font = "sans serif"
+
+[server]
+headless = true

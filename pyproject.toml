@@ -1,0 +1,27 @@
+[project]
+name = "garmin-coach"
+version = "0.1.0"
+description = "Local Garmin data pipeline + Streamlit dashboard + Claude MCP running coach"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "garminconnect>=0.3.6",
+    "mcp>=1.2.0",
+    "streamlit>=1.36",
+    "plotly>=5.22",
+    "pandas>=2.2",
+    "python-dotenv>=1.0",
+    "keyring>=25.0",
+    "tenacity>=8.3",
+]
+
+[project.optional-dependencies]
+# Level-5 agentic coach (optional). Install with: pip install -e ".[agent]"
+agent = ["anthropic>=0.40"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["garmin_coach"]
