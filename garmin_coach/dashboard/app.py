@@ -21,6 +21,7 @@ import config  # noqa: E402
 from garmin_coach import db  # noqa: E402
 from garmin_coach.ai import claude_cli, coach  # noqa: E402
 from garmin_coach.analytics import metrics  # noqa: E402
+from garmin_coach.ingest import launcher  # noqa: E402
 
 # =============================================================================
 # DESIGN SYSTEM — "Performance Telemetry"
@@ -410,6 +411,68 @@ tabs = st.tabs(
 
 # ============================================================ OVERVIEW
 with tabs[0]:
+    # --- pull latest data ----------------------------------------------------
+    # Same CLI the nightly scheduled task runs, so the button can't drift into
+    # its own behaviour. Ingestion is the only writer; it stays in a subprocess.
+    def _do_pull(mode: str, **kw) -> None:
+        with st.status("Pulling from Garmin…", expanded=True) as status:
+            log_box = st.empty()
+            lines: list[str] = []
+            result = None
+            for kind, payload in launcher.run_ingest(mode, **kw):
+                if kind == "log":
+                    lines.append(str(payload))
+                    log_box.code("\n".join(lines[-14:]), language="text")
+                else:
+                    result = payload
+
+            if result is None:
+                status.update(label="Pull produced no result.", state="error")
+                return
+            if result.ok:
+                status.update(label=result.summary(), state="complete",
+                              expanded=False)
+                # Charts read through @st.cache_data; without this they would
+                # keep serving pre-pull rows for up to the 5-minute TTL.
+                st.session_state.last_pull_msg = result.summary()
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                status.update(label=result.summary(), state="error")
+                st.session_state.last_pull_msg = None
+
+    if msg := st.session_state.pop("last_pull_msg", None):
+        st.success(msg, icon="✅")
+
+    pull_l, pull_r = st.columns([3, 1])
+    _seen = q("SELECT MAX(date) d FROM activities").iloc[0]["d"]
+    _pulled = launcher.last_ingest_at()
+    pull_l.caption(
+        f"Latest activity **{_seen or '—'}**"
+        + (f" · last pull {str(_pulled).replace('T', ' ')}" if _pulled else "")
+        + f" · today is {pd.Timestamp.today().date()}"
+    )
+    _busy = launcher.is_running()
+    if pull_r.button("⟳ Pull my latest data", type="primary", disabled=_busy,
+                     use_container_width=True,
+                     help="Re-pulls the trailing days plus recent activities — "
+                          "the same job the nightly task runs. Takes a minute or two."):
+        _do_pull("nightly")
+    if _busy:
+        st.caption("A pull is already running (started elsewhere). "
+                   "The button unlocks when it finishes.")
+
+    with st.expander("More pull options"):
+        st.caption("Backfill re-pulls a longer window; it skips dates already "
+                   "marked complete in `ingest_log`, so it is safe to re-run.")
+        bf_c1, bf_c2, bf_c3 = st.columns([2, 2, 1])
+        bf_days = bf_c1.number_input("Backfill days", 1, 365, 14)
+        bf_streams = bf_c2.checkbox("Include per-second streams", value=True,
+                                    help="Slower. Runs only; needed for "
+                                         "decoupling and pace/HR drill-downs.")
+        if bf_c3.button("Backfill", disabled=_busy, use_container_width=True):
+            _do_pull("backfill", days=int(bf_days), with_streams=bf_streams)
+
     acwr, zones = _acwr_and_zones()
     vol = q("SELECT COALESCE(SUM(distance_m),0)/1000.0 km FROM activities "
             "WHERE date >= date('now','-6 days') AND type LIKE '%running%'").iloc[0]["km"]

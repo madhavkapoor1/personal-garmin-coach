@@ -23,7 +23,7 @@ the same store, both are read-only, and neither needs an API key.
 | `config.py` | Paths, HR markers, throttle/backfill settings (reads `.env`). |
 | `garmin_coach/auth.py` | Token-cache login; never headless-retries credentials. |
 | `garmin_coach/schema.sql` · `db.py` | SQLite schema + UPSERT/connection helpers. |
-| `garmin_coach/ingest/` | `client` (throttle+retry), `wellness`, `activities`, `transforms`, `run` (CLI). |
+| `garmin_coach/ingest/` | `client` (throttle+retry), `wellness`, `activities`, `transforms`, `run` (CLI), `launcher` (the dashboard's pull button). |
 | `garmin_coach/analytics/metrics.py` | Decoupling, ACWR, pace-at-HR, zone split — shared everywhere. |
 | `garmin_coach/dashboard/app.py` | Streamlit dashboard (8 tabs, incl. the AI coach). |
 | `garmin_coach/mcp/server.py` | Read-only MCP server for Claude. |
@@ -122,6 +122,20 @@ mode anything else is denied rather than prompted. The database is opened read-o
 ```powershell
 PYTHONUTF8=1 python scripts\test_coach.py     # verify the whole path end to end
 ```
+
+## Pull data from the dashboard
+
+The **Overview** tab has a **⟳ Pull my latest data** button — no terminal needed. It runs exactly
+the same job as the nightly task (trailing days of wellness + recent activities), streams the log
+live, and refreshes the charts when it finishes. Takes a minute or two.
+
+**More pull options** underneath does a longer backfill (choose how many days, optionally skipping
+per-second streams for speed). Backfill skips dates already marked complete in `ingest_log`, so
+re-running it is cheap and safe.
+
+If your Garmin tokens have expired the button says so and points you at
+`python scripts/bootstrap_login.py` — that step needs MFA, so it can't be automated. A lock file
+(`data/ingest.lock`) stops two browser tabs pulling at once.
 
 ## Automate the nightly pull
 

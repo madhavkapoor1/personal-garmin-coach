@@ -67,6 +67,7 @@ Three decoupled layers (pull → store → read) so a Garmin outage or auth brea
 - `wellness.py` pulls per-day daily metrics; `activities.py` pulls per-date-range activity summaries + splits + HR zones + (opt-in, runs only) per-second streams.
 - `transforms.py` normalizes Garmin's varied/versioned JSON into flat rows — **every extractor is defensive** (probes multiple key paths, returns None not raises). Activity `raw_json` is stored so transforms can be re-run without re-hitting Garmin.
 - `run.py` is the CLI orchestrator. Backfill is resumable via the `ingest_log` table (per-date/dataset ok/missing/error). Idempotent: every write is UPSERT on a natural key.
+- `launcher.py` backs the dashboard's **Pull my latest data** button (Overview tab). It *shells out to the same `python -m garmin_coach.ingest.run` CLI* rather than importing it — the dashboard's connections are read-only and ingestion is the sole writer, an unofficial-client hang can be killed without taking Streamlit down, and the button, the terminal and Task Scheduler all share one code path. Streams log lines to `st.status`, holds a stale-tolerant `data/ingest.lock` so two browser tabs can't double-pull, and maps exit 3 → "tokens expired, re-run `bootstrap_login.py`". **After a successful pull it must call `st.cache_data.clear()`** — `q()` is cached with a 5-minute TTL and would otherwise keep serving pre-pull rows.
 
 **Store** — `garmin_coach/db.py` + `schema.sql`
 - `connect()` r/w for ingestion; `connect_ro()` read-only (URI immutable) for dashboard + MCP.
