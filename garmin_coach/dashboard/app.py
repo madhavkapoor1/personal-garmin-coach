@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import config  # noqa: E402
 from garmin_coach import db  # noqa: E402
+from garmin_coach.ai import claude_cli, coach  # noqa: E402
 from garmin_coach.analytics import metrics  # noqa: E402
 
 # =============================================================================
@@ -404,15 +405,16 @@ if len(_plan):
 
 tabs = st.tabs(
     ["Overview", "Running trends", "Load & recovery", "Fitness & Strength",
-     "Activity drill-down", "Sleep / HRV / stress", "Correlations"]
+     "Activity drill-down", "Sleep / HRV / stress", "Correlations", "AI coach"]
 )
 
 # ============================================================ OVERVIEW
 with tabs[0]:
     acwr, zones = _acwr_and_zones()
     vol = q("SELECT COALESCE(SUM(distance_m),0)/1000.0 km FROM activities "
-            "WHERE date >= date('now','-6 days')").iloc[0]["km"]
-    hrv_now = q("SELECT last_night_avg FROM hrv ORDER BY date DESC LIMIT 1")
+            "WHERE date >= date('now','-6 days') AND type LIKE '%running%'").iloc[0]["km"]
+    hrv_now = q("SELECT last_night_avg FROM hrv WHERE last_night_avg IS NOT NULL "
+                "ORDER BY date DESC LIMIT 1")
     rdy = q("SELECT AVG(score) s FROM readiness WHERE date >= date('now','-6 days')")
 
     # headline KPI tiles — status-coloured where a value carries a verdict
@@ -435,9 +437,19 @@ with tabs[0]:
                else "above 4-wk avg" if rv and base else "resting heart rate")
         rec_tile = tile("Resting HR", rv if rv is not None else "—", "bpm", sub,
                         "good" if (rv and base and rv < base) else "default")
+    # Acute-load tile: use Garmin training_load if the device provides it (unitless
+    # load points); otherwise it's a distance proxy — label it honestly in km so the
+    # number isn't mistaken for a running-only or unitless "load".
+    has_load = q("SELECT COUNT(training_load) n FROM activities").iloc[0]["n"] > 0
+    if has_load:
+        acute_tile = tile("Acute load", f"{acwr['acute_7d']:g}", "",
+                          "7-day training load", "info")
+    else:
+        acute_tile = tile("Acute distance", f"{acwr['acute_7d']:g}", "km",
+                          "all sports · 7-day load proxy", "info")
     kpi_row([
-        tile("7-day volume", f"{vol:.1f}", "km", "rolling 7 days", "accent"),
-        tile("Acute load", f"{acwr['acute_7d']:g}", "", "7-day sum", "info"),
+        tile("7-day volume", f"{vol:.1f}", "km", "running · rolling 7 days", "accent"),
+        acute_tile,
         tile("ACWR", acwr["acwr"] if acwr["acwr"] else "—", "",
              acwr["flag"].title() + " · aim 0.8–1.3", _acwr_tone),
         tile("HRV last night", hrv_v if hrv_v is not None else "—", "ms",
@@ -564,16 +576,23 @@ with tabs[1]:
 
     section("Aerobic engine", "Pace at a fixed heart rate",
             "Same effort, faster pace = a stronger aerobic engine. A falling line "
-            "means you're getting fitter. Set the HR band your easy runs live in.")
+            "means you're getting fitter. Defaults to your easy-run HR band.")
     zn = get_zones()
-    st.caption(f"Zones from {zn['source']} · easy ceiling {zn['z2_ceiling']} · "
-               f"LTHR {zn['lthr']} · max {zn['max_hr']} bpm")
-    cc1, cc2 = st.columns(2)
-    hr_low = cc1.number_input("HR band low", 100, 210, max(100, zn["z2_ceiling"] - 15))
-    hr_high = cc2.number_input("HR band high", 100, 210, zn["z2_ceiling"])
+    # Default to the athlete's easy band, derived from their live Garmin zones, so
+    # the chart just renders. The manual override is tucked into an expander.
+    hr_low = max(100, zn["z2_ceiling"] - 15)
+    hr_high = zn["z2_ceiling"]
+    with st.expander("⚙ Adjust HR band"):
+        st.caption(f"Zones from {zn['source']} · easy ceiling {zn['z2_ceiling']} · "
+                   f"LTHR {zn['lthr']} · max {zn['max_hr']} bpm")
+        cc1, cc2 = st.columns(2)
+        hr_low = cc1.number_input("HR band low", 100, 210, hr_low)
+        hr_high = cc2.number_input("HR band high", 100, 210, hr_high)
     conn = db.connect_ro()
     pah = pd.DataFrame(metrics.pace_at_hr(conn, int(hr_low), int(hr_high), months=12))
     conn.close()
+    st.caption(f"Easy band {int(hr_low)}–{int(hr_high)} bpm"
+               + (f" · {int(pah['runs'].sum())} runs" if len(pah) and 'runs' in pah else ""))
     if len(pah):
         fig = go.Figure(go.Scatter(
             x=pah["month"], y=pah["avg_pace_s_per_km"], mode="lines+markers",
@@ -1126,3 +1145,134 @@ with tabs[6]:
                        "Correlation ≠ causation — confounders like hard days exist.")
     else:
         st.info("Need more runs joined with recovery data to explore pairs.")
+
+# ============================================================ AI COACH
+with tabs[7]:
+    section("Ask your coach", "Claude · reading this same database",
+            "Runs the Claude Code CLI already installed on this machine, so "
+            "coaching rides the Claude subscription you already pay for — no "
+            "API key lives in this project. The coach gets a briefing of your "
+            "current state plus read-only query access to the same SQLite file "
+            "these charts are drawn from.")
+
+    # Probing shells out, and every Streamlit rerun re-executes this tab, so
+    # cache it — a missing CLI is not going to appear mid-session.
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _coach_probe():
+        return claude_cli.probe()
+
+    @st.cache_data(ttl=300, show_spinner=False)
+    def _coach_briefing() -> str:
+        return coach.build_briefing()
+
+    cli_ok, cli_msg = _coach_probe()
+
+    st.session_state.setdefault("coach_msgs", [])
+    st.session_state.setdefault("coach_sid", None)
+    st.session_state.setdefault("coach_queued", None)
+
+    if not cli_ok:
+        st.warning(f"**AI coach unavailable.** {cli_msg}", icon="⚠")
+        st.caption("Everything else in this dashboard works without it — the "
+                   "charts read the database directly and never need Claude.")
+    else:
+        head_l, head_r = st.columns([5, 1])
+        head_l.caption(f"Claude Code {cli_msg} · model set by your CLI default · "
+                       f"reading `{config.DB_PATH.name}`")
+        if head_r.button("New chat", use_container_width=True,
+                         disabled=not st.session_state.coach_msgs):
+            st.session_state.coach_msgs = []
+            st.session_state.coach_sid = None
+            st.rerun()
+
+        # Starting points, so the tab is useful without having to think up a
+        # question. Clicking one queues it through the same path as typing.
+        if not st.session_state.coach_msgs:
+            st.caption("Start with one of these, or ask anything below.")
+            for row in (coach.SUGGESTED[:3], coach.SUGGESTED[3:]):
+                for col, (label, full) in zip(st.columns(len(row)), row):
+                    if col.button(label, use_container_width=True, key=f"sug_{label}"):
+                        st.session_state.coach_queued = full
+                        st.rerun()
+
+            with st.expander("What the coach can see"):
+                st.caption("Sent as a briefing on the first message of a chat. "
+                           "Everything else it looks up itself, read-only.")
+                st.code(_coach_briefing(), language="text")
+
+        for msg in st.session_state.coach_msgs:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+                if msg.get("meta"):
+                    st.caption(msg["meta"])
+
+        typed = st.chat_input("Ask about your training…")
+        question = typed or st.session_state.coach_queued
+        st.session_state.coach_queued = None
+
+        if question:
+            st.session_state.coach_msgs.append({"role": "user", "content": question})
+            with st.chat_message("user"):
+                st.markdown(question)
+
+            with st.chat_message("assistant"):
+                status = st.empty()
+                status.caption("Reading your training data…")
+                holder: dict = {}
+
+                def _turn():
+                    """Yield text deltas; report tool calls through `status`."""
+                    # The briefing only rides the first message — after that the
+                    # resumed session already has it, and resending would bloat
+                    # every turn and break the prompt cache.
+                    first = st.session_state.coach_sid is None
+                    prompt = coach.build_prompt(
+                        question, briefing=_coach_briefing() if first else None,
+                        include_briefing=first)
+                    for kind, payload in claude_cli.stream_turn(
+                            prompt,
+                            system_prompt=coach.SYSTEM_PROMPT,
+                            session_id=st.session_state.coach_sid,
+                            use_tools=True):
+                        if kind == "text":
+                            yield payload
+                        elif kind == "tool":
+                            status.caption(f"Looking up `{payload}`…")
+                        elif kind == "done":
+                            holder["reply"] = payload
+
+                try:
+                    st.write_stream(_turn())
+                except Exception as exc:  # a broken CLI must not kill the tab
+                    holder.setdefault(
+                        "reply",
+                        claude_cli.Reply(is_error=True,
+                                         error=f"{type(exc).__name__}: {exc}"))
+
+                status.empty()
+                reply = holder.get("reply") or claude_cli.Reply(
+                    is_error=True, error="No response from Claude.")
+
+                if reply.is_error:
+                    st.error(f"**Coach failed.** {reply.error}", icon="⚠")
+                    st.session_state.coach_msgs.pop()  # don't strand the question
+                else:
+                    st.session_state.coach_sid = reply.session_id
+                    bits = []
+                    if reply.duration_ms:
+                        bits.append(f"{reply.duration_ms / 1000:.0f}s")
+                    tools = [t for t in reply.tools_used if t != "ToolSearch"]
+                    if tools:
+                        bits.append("looked up "
+                                    + ", ".join(f"`{t}`" for t in dict.fromkeys(tools)))
+                    if reply.mcp_connected is False:
+                        bits.append("⚠ data tools offline — answered from the "
+                                    "briefing only")
+                    meta = " · ".join(bits)
+                    if meta:
+                        st.caption(meta)
+                    st.session_state.coach_msgs.append(
+                        {"role": "assistant", "content": reply.text, "meta": meta})
+
+        st.caption("Coaching guidance from a model, not a medical professional. "
+                   "It reads real numbers, but check anything that matters.")

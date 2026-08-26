@@ -35,13 +35,18 @@ GARMIN_DB=data/garmin_sample.db streamlit run garmin_coach/dashboard/app.py
 
 python scripts/test_mcp.py                          # end-to-end MCP: lists tools, calls each, checks write-guard
 
+# AI coach: CLI present -> briefing builds -> a real turn reaches the MCP tools.
+# Catches the silent "MCP never connected, answered from briefing only" failure.
+PYTHONUTF8=1 python scripts/test_coach.py
+PYTHONUTF8=1 python scripts/test_coach.py --offline  # skip the live Claude turn
+
 # Dashboard smoke test (runs the whole app headless, surfaces any exception) — the primary "test":
 PYTHONUTF8=1 python -c "from streamlit.testing.v1 import AppTest; \
 at=AppTest.from_file('garmin_coach/dashboard/app.py',default_timeout=90).run(); \
 print('CLEAN' if not at.exception else at.exception)"
 ```
 
-There is no unit-test suite; `AppTest` + `scripts/test_mcp.py` against the sample DB are the verification path.
+There is no unit-test suite; `AppTest` + `scripts/test_mcp.py` + `scripts/test_coach.py` against the sample DB are the verification path.
 
 ## Environment gotchas (Windows)
 
@@ -51,6 +56,7 @@ There is no unit-test suite; `AppTest` + `scripts/test_mcp.py` against the sampl
   Get-NetTCPConnection -LocalPort 8501 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
   ```
 - **Scripts printing emoji** need `PYTHONUTF8=1` (Windows cp1252 stdout otherwise raises UnicodeEncodeError).
+- **Never spawn `claude` through npm's `claude.cmd`.** The shim is a batch file, so Windows re-parses the command line through cmd.exe, and an argument containing a **newline** — like the coach's multi-line `--system-prompt` — terminates that line. Every flag after it is silently dropped: `--mcp-config` and `--strict-mcp-config` vanish, the Garmin MCP server never loads, and the user's unrelated *global* MCP servers get pulled in instead. No error is raised — the coach just answers with no data and claims the tools aren't connected. `claude_cli.find_cli()` resolves through the shim to the real `node_modules/@anthropic-ai/claude-code/bin/claude.exe`; keep that behaviour. Verify with the `system`/`init` event, which lists `mcp_servers` — `garmin` must be `connected` (surfaced as `Reply.mcp_connected`).
 
 ## Architecture
 
@@ -66,9 +72,12 @@ Three decoupled layers (pull → store → read) so a Garmin outage or auth brea
 - `connect()` r/w for ingestion; `connect_ro()` read-only (URI immutable) for dashboard + MCP.
 - Schema evolves two ways: new tables via `CREATE TABLE IF NOT EXISTS` in `schema.sql`; new columns via the `_MIGRATIONS` list in `db.py` (idempotent `ALTER TABLE ADD COLUMN`). `init_db()` applies both.
 
-**Read** — two independent consumers of the same store:
+**Read** — three consumers of the same store:
 - `dashboard/app.py` (Streamlit + Plotly). Theming lives in `.streamlit/config.toml` + an injected CSS block; charts share the `_style()` helper and a validated colorblind-safe palette. Never use dual-axis charts (split into stacked single-axis).
 - `mcp/server.py` (FastMCP, stdio). **Read-only**: DB opened `mode=ro`, and `run_sql` rejects anything that isn't a single SELECT/WITH. Tools auto-format pace to `min_km` alongside raw seconds.
+- `ai/` — the dashboard's **AI coach** tab. Shells out to the local **Claude Code CLI** (`claude -p`), *not* the Anthropic API, so coaching rides the user's existing subscription and no API key ever lives in this project. `ai/claude_cli.py` is the transport (spawn, stream, parse); `ai/coach.py` is the domain layer (system prompt, `build_briefing()`, suggested questions). It launches the MCP server above via `--mcp-config`, allow-listing only `mcp__garmin__*` — no Bash/Edit/Write, and in `-p` mode a non-allow-listed tool is denied rather than prompted, so an unattended run can never block or mutate.
+
+**Why a briefing *and* tools:** `build_briefing()` pre-computes a ~800-token snapshot (plan, zones, ACWR, 21d activities, 14d recovery, upcoming sessions) so the common questions need zero tool calls and the coach always answers from the same slice the charts show. Tools cover the depth beyond it. Personal records are deliberately left out of the briefing — `personal_records.value` is a bare number whose unit varies by type, so quoting it unlabelled invites a confidently wrong answer.
 
 **Shared analytics** — `garmin_coach/analytics/metrics.py` backs both the dashboard and MCP so fitness is computed identically everywhere: decoupling, ACWR, pace-at-fixed-HR, zone distribution, and `effective_zones()`.
 
@@ -79,3 +88,54 @@ Three decoupled layers (pull → store → read) so a Garmin outage or auth brea
 - **"missing" ≠ "error".** Many endpoints are genuinely empty for a given account/device (e.g. Training Readiness, Training Status, SpO2 here). Transforms return None → logged `missing`; charts must not plot these as zero.
 - **Data volume:** this user's Garmin history only starts ~2026-06-09; older dates return empty. A full-year backfill is wasteful.
 - The user is on a Garmin adaptive **Half Marathon** plan (`training_plan`/`planned_workouts` tables) — planned-vs-actual is forward-looking only (Garmin replaces past prescriptions with the logged activity).
+
+## Productization directions (PARKED — decide later)
+
+Explored turning this personal tool into a product. Not decided. **The decision that gates
+everything is the data door: how does each user's data get in, legally and reliably? Platform
+choice (web / iOS / desktop) follows from that, not the reverse.** Notes for a future session:
+
+**The data-door options (the crux):**
+- **`python-garminconnect` (what we use now)** — unofficial, logs in with the user's real
+  password + MFA, mimics the Android app. Fine for single-user local. **NOT viable multi-user:**
+  custodying strangers' Garmin credentials/tokens = breach target holding health data + logins,
+  almost certainly against Garmin ToS. Do not build a product on it.
+- **Garmin official Health + Activity API** — ToS-clean, gives *both* recovery (sleep/HRV/stress/
+  Body Battery) and activity data via OAuth. But **approval-gated and business-oriented**; whether
+  a small/solo player can get access, on what terms/cost, is UNKNOWN. **Validate this first if
+  recovery data is core to the product.**
+- **Apple HealthKit (iOS only)** — clean, Apple-blessed door; no credential custody. Garmin
+  Connect syncs raw data (HR, HRV, sleep, RHR, workouts, pace/distance, steps) into Apple Health.
+  BUT Garmin-proprietary *derived* metrics largely DON'T flow: Body Battery, Training Load/Status,
+  VO₂max, race predictions, Training Effect. We already compute our own (ACWR, decoupling, zones,
+  pace-at-HR) — so compute-your-own becomes the differentiator.
+- **Strava OAuth (web / any platform)** — clean, self-serve, free, no approval gauntlet; most
+  Garmin users already auto-sync Garmin→Strava. The web equivalent of HealthKit. Gives *training*
+  data (runs, HR, pace, splits, per-second streams) → keeps load/ACWR/80-20/pace-at-HR/decoupling/
+  splits/zones + AI coach. Does NOT give recovery/wellness (sleep/HRV/Body Battery/stress).
+
+**The core strategic question:** is the product the **training intelligence** (Strava-web works
+NOW) or the **recovery↔performance link** (needs Garmin's approval-gated official API, harder)?
+
+**Paths, roughly easiest→hardest:**
+1. **Personal, hosted** — deploy the current Streamlit app for the user only. Trivial (an afternoon).
+2. **Open-source template** — others self-host with their own Garmin login + own Claude. Near-zero
+   liability, leverages the existing public GitHub repo. Sweet spot for "make it a thing" cheaply.
+3. **Web SaaS on Strava OAuth** — legit multi-user day one; training-focused; ship fast to test the
+   real hypothesis (will runners pay for an AI coach on their data). Add Garmin-official recovery later.
+4. **iOS App Store app** — HealthKit removes the auth landmine, but it's a native REBUILD (SwiftUI/
+   React Native; Streamlit/Plotly/SQLite/MCP ship nothing to the App Store), needs a Mac + Xcode,
+   $99/yr, higher health-app review scrutiny, 15–30% cut on subs.
+
+**Other realities to remember:**
+- **AI-coach economics flip.** Today coaching is free because the MCP server rides the user's own
+  Claude subscription. Any multi-user product pays per-user inference via the Claude API → needs a
+  subscription model (and a small backend so API keys aren't shipped in the client).
+- **Competitors are NOT Bevel** (bevel.health = broad health/longevity aggregator, different lane).
+  Real competitors = training apps: TrainingPeaks, Intervals.icu, Runalyze, Athletica, Runna,
+  HRV4Training — several already ship AI coaching. **The differentiation question to answer before
+  building: what makes this AI running coach better than theirs for a runner who'd otherwise use them?**
+- **What's reusable vs. a rewrite:** the analytics logic (`analytics/metrics.py`: ACWR, decoupling,
+  zones, pace-at-HR, correlations) and the dark "Performance Telemetry" design system are portable
+  as a **spec**. The Streamlit/Plotly/SQLite/MCP stack does not ship to a native app; a hosted or
+  native build reimplements the presentation layer.

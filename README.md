@@ -6,9 +6,15 @@ Inspired by the *Running on AI* field guide — this implements **Level 4** (own
 
 ```
 Garmin Connect ──(ingest)──▶ SQLite (data/garmin.db) ──▶ Dashboard (Streamlit)
-                                   │
+                                   │                          │
+                                   │                          └──▶ AI coach tab
+                                   │                               (local `claude -p`)
                                    └──▶ MCP server (read-only) ──▶ Claude Code / Desktop
 ```
+
+The coach is reachable two ways: from **your own Claude** (register the MCP server, below) or
+from the dashboard's **AI coach** tab, which drives the local Claude Code CLI for you. Both read
+the same store, both are read-only, and neither needs an API key.
 
 ## Layout
 
@@ -19,8 +25,9 @@ Garmin Connect ──(ingest)──▶ SQLite (data/garmin.db) ──▶ Dashboa
 | `garmin_coach/schema.sql` · `db.py` | SQLite schema + UPSERT/connection helpers. |
 | `garmin_coach/ingest/` | `client` (throttle+retry), `wellness`, `activities`, `transforms`, `run` (CLI). |
 | `garmin_coach/analytics/metrics.py` | Decoupling, ACWR, pace-at-HR, zone split — shared everywhere. |
-| `garmin_coach/dashboard/app.py` | Streamlit dashboard (6 tabs). |
+| `garmin_coach/dashboard/app.py` | Streamlit dashboard (8 tabs, incl. the AI coach). |
 | `garmin_coach/mcp/server.py` | Read-only MCP server for Claude. |
+| `garmin_coach/ai/` | In-dashboard AI coach: drives the local `claude -p` CLI (no API key). |
 | `scripts/bootstrap_login.py` | One-time interactive (MFA) login. |
 | `scripts/nightly.ps1` | Task Scheduler wrapper. |
 | `scripts/seed_sample_data.py` | Generate fake data to explore without a Garmin account. |
@@ -91,6 +98,30 @@ Then ask Claude things like:
 - *"Run my weekly review."* (uses the built-in `weekly_review` prompt)
 
 The server is **read-only** — `run_sql` rejects anything that isn't a `SELECT`, so Claude can never modify your data. Tools: `get_schema`, `run_sql`, `get_recent_metrics`, `list_activities`, `get_activity_detail`, `get_training_load`, `get_pace_at_hr`.
+
+## Coach inside the dashboard (**AI coach** tab)
+
+You don't have to leave the dashboard to ask a question. The **AI coach** tab talks to the
+**Claude Code CLI already installed on this machine** (`claude -p`, headless) — so it rides the
+Claude subscription you already pay for. **There is no API key anywhere in this project and no
+per-token bill.**
+
+Requirements: `claude` on your `PATH`, logged in once (`npm install -g @anthropic-ai/claude-code`,
+then run `claude`). Set `GARMIN_CLAUDE_BIN` if it lives somewhere unusual. If the CLI is missing
+the tab explains what to do and the rest of the dashboard carries on unaffected — the charts never
+need Claude.
+
+Each question gets a ~800-token **briefing** (plan, live HR zones, ACWR, last 21 days of
+activities, 14 days of recovery, upcoming sessions) plus read-only access to the MCP tools above,
+so it can dig into a specific session or run its own SQL. Follow-ups reuse the same Claude session,
+so context carries and the briefing isn't resent.
+
+Safety: only `mcp__garmin__*` tools are allow-listed — no shell, no file writes — and in headless
+mode anything else is denied rather than prompted. The database is opened read-only.
+
+```powershell
+PYTHONUTF8=1 python scripts\test_coach.py     # verify the whole path end to end
+```
 
 ## Automate the nightly pull
 
