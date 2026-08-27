@@ -25,3 +25,6 @@ Thumbs.db
 
 # Third-party reference material (not part of the project)
 *.pdf
+
+# Private working notes — this repo is public; keep strategy out of it
+NOTES-*.md

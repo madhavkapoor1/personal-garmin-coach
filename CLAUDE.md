@@ -90,53 +90,7 @@ Three decoupled layers (pull → store → read) so a Garmin outage or auth brea
 - **Data volume:** this user's Garmin history only starts ~2026-06-09; older dates return empty. A full-year backfill is wasteful.
 - The user is on a Garmin adaptive **Half Marathon** plan (`training_plan`/`planned_workouts` tables) — planned-vs-actual is forward-looking only (Garmin replaces past prescriptions with the logged activity).
 
-## Productization directions (PARKED — decide later)
+## Product direction
 
-Explored turning this personal tool into a product. Not decided. **The decision that gates
-everything is the data door: how does each user's data get in, legally and reliably? Platform
-choice (web / iOS / desktop) follows from that, not the reverse.** Notes for a future session:
+Parked notes on turning this into a product (the data-door problem, platform trade-offs, competitive landscape) live in `NOTES-productization.md` — **untracked and gitignored**, since this repo is public. Read it before reopening that question; the short version is that multi-user is gated on replacing `python-garminconnect`, which cannot custody other people's Garmin credentials.
 
-**The data-door options (the crux):**
-- **`python-garminconnect` (what we use now)** — unofficial, logs in with the user's real
-  password + MFA, mimics the Android app. Fine for single-user local. **NOT viable multi-user:**
-  custodying strangers' Garmin credentials/tokens = breach target holding health data + logins,
-  almost certainly against Garmin ToS. Do not build a product on it.
-- **Garmin official Health + Activity API** — ToS-clean, gives *both* recovery (sleep/HRV/stress/
-  Body Battery) and activity data via OAuth. But **approval-gated and business-oriented**; whether
-  a small/solo player can get access, on what terms/cost, is UNKNOWN. **Validate this first if
-  recovery data is core to the product.**
-- **Apple HealthKit (iOS only)** — clean, Apple-blessed door; no credential custody. Garmin
-  Connect syncs raw data (HR, HRV, sleep, RHR, workouts, pace/distance, steps) into Apple Health.
-  BUT Garmin-proprietary *derived* metrics largely DON'T flow: Body Battery, Training Load/Status,
-  VO₂max, race predictions, Training Effect. We already compute our own (ACWR, decoupling, zones,
-  pace-at-HR) — so compute-your-own becomes the differentiator.
-- **Strava OAuth (web / any platform)** — clean, self-serve, free, no approval gauntlet; most
-  Garmin users already auto-sync Garmin→Strava. The web equivalent of HealthKit. Gives *training*
-  data (runs, HR, pace, splits, per-second streams) → keeps load/ACWR/80-20/pace-at-HR/decoupling/
-  splits/zones + AI coach. Does NOT give recovery/wellness (sleep/HRV/Body Battery/stress).
-
-**The core strategic question:** is the product the **training intelligence** (Strava-web works
-NOW) or the **recovery↔performance link** (needs Garmin's approval-gated official API, harder)?
-
-**Paths, roughly easiest→hardest:**
-1. **Personal, hosted** — deploy the current Streamlit app for the user only. Trivial (an afternoon).
-2. **Open-source template** — others self-host with their own Garmin login + own Claude. Near-zero
-   liability, leverages the existing public GitHub repo. Sweet spot for "make it a thing" cheaply.
-3. **Web SaaS on Strava OAuth** — legit multi-user day one; training-focused; ship fast to test the
-   real hypothesis (will runners pay for an AI coach on their data). Add Garmin-official recovery later.
-4. **iOS App Store app** — HealthKit removes the auth landmine, but it's a native REBUILD (SwiftUI/
-   React Native; Streamlit/Plotly/SQLite/MCP ship nothing to the App Store), needs a Mac + Xcode,
-   $99/yr, higher health-app review scrutiny, 15–30% cut on subs.
-
-**Other realities to remember:**
-- **AI-coach economics flip.** Today coaching is free because the MCP server rides the user's own
-  Claude subscription. Any multi-user product pays per-user inference via the Claude API → needs a
-  subscription model (and a small backend so API keys aren't shipped in the client).
-- **Competitors are NOT Bevel** (bevel.health = broad health/longevity aggregator, different lane).
-  Real competitors = training apps: TrainingPeaks, Intervals.icu, Runalyze, Athletica, Runna,
-  HRV4Training — several already ship AI coaching. **The differentiation question to answer before
-  building: what makes this AI running coach better than theirs for a runner who'd otherwise use them?**
-- **What's reusable vs. a rewrite:** the analytics logic (`analytics/metrics.py`: ACWR, decoupling,
-  zones, pace-at-HR, correlations) and the dark "Performance Telemetry" design system are portable
-  as a **spec**. The Streamlit/Plotly/SQLite/MCP stack does not ship to a native app; a hosted or
-  native build reimplements the presentation layer.
